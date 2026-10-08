@@ -1,0 +1,118 @@
+# Managed by Ansible. Не править на сервере: следующий прогон затрёт файл.
+external_url '{{ gitlab_external_url }}'
+
+letsencrypt['enable'] = {{ 'true' if gitlab_tls_mode == 'letsencrypt' else 'false' }}
+{% if gitlab_tls_mode == 'letsencrypt' %}
+letsencrypt['contact_emails'] = ['{{ gitlab_letsencrypt_email }}']
+letsencrypt['auto_renew'] = true
+{% endif %}
+{% if gitlab_tls_mode == 'provided' %}
+nginx['ssl_certificate'] = "{{ gitlab_ssl_certificate }}"
+nginx['ssl_certificate_key'] = "{{ gitlab_ssl_certificate_key }}"
+{% endif %}
+
+nginx['redirect_http_to_https'] = true
+nginx['hsts_max_age'] = 63072000
+nginx['hsts_include_subdomains'] = {{ 'true' if gitlab_hsts_include_subdomains else 'false' }}
+nginx['ssl_protocols'] = "TLSv1.2 TLSv1.3"
+nginx['client_max_body_size'] = '{{ gitlab_max_body_size }}'
+# Совпадает с combined-форматом CrowdSec и не пишет query string.
+nginx['log_format'] = '$remote_addr - $remote_user [$time_local] "$request_method $filtered_request_uri $server_protocol" $status $body_bytes_sent "$filtered_http_referer" "$http_user_agent"'
+nginx['custom_gitlab_server_config'] = "add_header Referrer-Policy strict-origin-when-cross-origin always;\nadd_header Permissions-Policy \"geolocation=(), microphone=(), camera=()\" always;\n"
+
+registry['enable'] = false
+gitlab_pages['enable'] = false
+mattermost['enable'] = false
+gitlab_kas['enable'] = false
+gitlab_rails['impersonation_enabled'] = false
+gitlab_rails['usage_ping_enabled'] = false
+# Каталог читает только Keycloak. В GitLab LDAP нет.
+gitlab_rails['ldap_enabled'] = false
+{% if keycloak_enabled | bool %}
+gitlab_rails['omniauth_enabled'] = true
+gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+gitlab_rails['omniauth_allow_bypass_two_factor'] = ['openid_connect']
+gitlab_rails['omniauth_auto_link_user'] = false
+gitlab_rails['omniauth_block_auto_created_users'] = false
+gitlab_rails['omniauth_sync_email_from_provider'] = true
+gitlab_rails['omniauth_sync_profile_from_provider'] = true
+gitlab_rails['omniauth_sync_profile_attributes'] = ['email', 'name']
+gitlab_rails['omniauth_providers'] = [
+  {
+    name: "openid_connect",
+    label: "SSO",
+    args: {
+      name: "openid_connect",
+      # Scope groups этот клиент Keycloak отклоняет. Claim groups должен прийти из mapper клиента.
+      scope: ["openid", "profile", "email"],
+      response_type: "code",
+      issuer: "{{ keycloak_url | regex_replace('/$', '') }}/realms/{{ keycloak_realm }}",
+      discovery: true,
+      client_auth_method: "basic",
+      uid_field: "{{ keycloak_uid_field }}",
+      pkce: true,
+      send_scope_to_token_endpoint: false,
+      client_options: {
+        identifier: "{{ keycloak_gitlab_client_id }}",
+        secret: File.read("/etc/gitlab/keycloak_client_secret").strip,
+        redirect_uri: "{{ gitlab_external_url }}/users/auth/openid_connect/callback"
+      }
+    }
+  }
+]
+{% else %}
+gitlab_rails['omniauth_enabled'] = false
+{% endif %}
+gitlab_rails['backup_keep_time'] = {{ gitlab_backup_keep_seconds }}
+gitlab_rails['monitoring_whitelist'] = ['127.0.0.0/8', '::1/128']
+gitlab_rails['rack_attack_git_basic_auth'] = {
+  'enabled' => true,
+  'ip_whitelist' => ['127.0.0.1', '::1'],
+  'maxretry' => 10,
+  'findtime' => 60,
+  'bantime' => 3600
+}
+
+prometheus['listen_address'] = '127.0.0.1:9090'
+alertmanager['listen_address'] = '127.0.0.1:9093'
+node_exporter['listen_address'] = '127.0.0.1:9100'
+redis_exporter['listen_address'] = '127.0.0.1:9121'
+postgres_exporter['listen_address'] = '127.0.0.1:9187'
+gitlab_exporter['listen_address'] = '127.0.0.1:9168'
+gitlab_workhorse['prometheus_listen_addr'] = '127.0.0.1:9229'
+redis['bind'] = '127.0.0.1'
+
+# Omnibus сливает этот hash с дефолтом. Здесь только каталог hook.
+gitaly['configuration'] = {
+  hooks: {
+    custom_hooks_dir: "/var/opt/gitlab/gitaly/custom_hooks",
+  },
+}
+
+{% if gitlab_backup_s3_enabled | bool %}
+gitlab_rails['backup_upload_connection'] = {
+  'provider' => 'AWS',
+  'region' => '{{ gitlab_backup_s3_region }}',
+  'aws_access_key_id' => File.read("/etc/gitlab/backup_s3_access_key").strip,
+  'aws_secret_access_key' => File.read("/etc/gitlab/backup_s3_secret").strip{% if gitlab_backup_s3_endpoint | length > 0 %},
+  'endpoint' => '{{ gitlab_backup_s3_endpoint }}',
+  'path_style' => {{ 'true' if gitlab_backup_s3_path_style | bool else 'false' }}{% endif %}
+
+}
+gitlab_rails['backup_upload_remote_directory'] = '{{ gitlab_backup_s3_bucket }}'
+{% endif %}
+{% if gitlab_smtp_enabled %}
+gitlab_rails['smtp_enable'] = true
+gitlab_rails['smtp_address'] = "{{ gitlab_smtp_address }}"
+gitlab_rails['smtp_port'] = {{ gitlab_smtp_port }}
+gitlab_rails['smtp_user_name'] = "{{ gitlab_smtp_user }}"
+gitlab_rails['smtp_password'] = File.read("/etc/gitlab/smtp_password").strip
+gitlab_rails['smtp_domain'] = "{{ gitlab_smtp_domain }}"
+gitlab_rails['smtp_authentication'] = "login"
+gitlab_rails['smtp_enable_starttls_auto'] = true
+gitlab_rails['smtp_openssl_verify_mode'] = "peer"
+gitlab_rails['gitlab_email_from'] = "{{ gitlab_email_from }}"
+gitlab_rails['gitlab_email_reply_to'] = "{{ gitlab_email_from }}"
+{% else %}
+gitlab_rails['smtp_enable'] = false
+{% endif %}

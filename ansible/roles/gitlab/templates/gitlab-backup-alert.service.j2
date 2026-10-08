@@ -1,0 +1,6 @@
+[Unit]
+Description=Email when the GitLab backup fails
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gitlab-backup-alert

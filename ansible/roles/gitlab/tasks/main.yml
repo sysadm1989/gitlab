@@ -1,0 +1,290 @@
+---
+- name: Каталог для ключа apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Скачать ключ репозитория GitLab
+  ansible.builtin.get_url:
+    url: https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey
+    dest: /etc/apt/keyrings/gitlab-ce.asc
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Преобразовать ключ GitLab в keyring
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --yes
+      - --dearmor
+      - -o
+      - /etc/apt/keyrings/gitlab-ce.gpg
+      - /etc/apt/keyrings/gitlab-ce.asc
+    creates: /etc/apt/keyrings/gitlab-ce.gpg
+
+- name: Репозиторий GitLab CE для Ubuntu 26.04
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/gitlab-ce.list
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      deb [signed-by=/etc/apt/keyrings/gitlab-ce.gpg] https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu resolute main
+
+- name: Каталог /etc/gitlab до установки пакета
+  ansible.builtin.file:
+    path: /etc/gitlab
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Пароль SMTP вне gitlab.rb
+  ansible.builtin.copy:
+    dest: /etc/gitlab/smtp_password
+    content: "{{ vault_gitlab_smtp_password }}\n"
+    mode: "0600"
+    owner: root
+    group: root
+  when: gitlab_smtp_enabled | bool
+  no_log: true
+  register: smtp_file
+
+- name: Ключ доступа к бакету бэкапов
+  ansible.builtin.copy:
+    dest: /etc/gitlab/backup_s3_access_key
+    content: "{{ vault_gitlab_backup_s3_access_key }}\n"
+    mode: "0600"
+    owner: root
+    group: root
+  when: gitlab_backup_s3_enabled | bool
+  no_log: true
+  register: backup_s3_access_file
+
+- name: Секретный ключ бакета бэкапов
+  ansible.builtin.copy:
+    dest: /etc/gitlab/backup_s3_secret
+    content: "{{ vault_gitlab_backup_s3_secret_key }}\n"
+    mode: "0600"
+    owner: root
+    group: root
+  when: gitlab_backup_s3_enabled | bool
+  no_log: true
+  register: backup_s3_secret_file
+
+- name: Профиль AWS CLI для выгрузки секретов бэкапа
+  ansible.builtin.copy:
+    dest: /etc/gitlab/backup_s3_credentials
+    content: |
+      [default]
+      aws_access_key_id = {{ vault_gitlab_backup_s3_access_key }}
+      aws_secret_access_key = {{ vault_gitlab_backup_s3_secret_key }}
+    mode: "0600"
+    owner: root
+    group: root
+  when: gitlab_backup_s3_enabled | bool
+  no_log: true
+
+- name: Регион и стиль адресов S3
+  ansible.builtin.copy:
+    dest: /etc/gitlab/backup_s3_aws_config
+    content: |
+      [default]
+      region = {{ gitlab_backup_s3_region }}
+      s3 =
+          addressing_style = {{ 'path' if gitlab_backup_s3_path_style | bool else 'auto' }}
+    mode: "0600"
+    owner: root
+    group: root
+  when: gitlab_backup_s3_enabled | bool
+
+- name: Секрет клиента GitLab в Keycloak
+  ansible.builtin.copy:
+    dest: /etc/gitlab/keycloak_client_secret
+    content: "{{ vault_keycloak_client_secret }}\n"
+    mode: "0600"
+    owner: root
+    group: root
+  when: keycloak_enabled | bool
+  no_log: true
+  register: keycloak_secret_file
+
+- name: Записать gitlab.rb
+  ansible.builtin.template:
+    src: gitlab.rb.j2
+    dest: /etc/gitlab/gitlab.rb
+    mode: "0600"
+    owner: root
+    group: root
+  register: gitlab_rb
+
+- name: Состояние пакета gitlab-ce
+  ansible.builtin.command: dpkg-query -W -f '${db:Status-Status}' gitlab-ce
+  register: gitlab_pkg_status
+  changed_when: false
+  failed_when: false
+
+# Первый reconfigure создаёт bootstrapped до Let's Encrypt. Если сертификат не выпустился,
+# postinst больше не вызывает reconfigure и падает с текстом про public attributes.
+- name: Донастроить GitLab, если первая установка оборвалась
+  ansible.builtin.command: gitlab-ctl reconfigure
+  when: gitlab_pkg_status.stdout == 'half-configured'
+  timeout: 1800
+  changed_when: true
+
+- name: Поставить GitLab CE из репозитория resolute
+  ansible.builtin.apt:
+    name: "gitlab-ce={{ gitlab_ce_version }}"
+    state: present
+    update_cache: true
+  environment:
+    EXTERNAL_URL: "{{ gitlab_external_url }}"
+    DEBIAN_FRONTEND: noninteractive
+  register: gitlab_pkg
+
+- name: Администратор GitLab из группы Keycloak
+  ansible.builtin.template:
+    src: keycloak_admin_group.rb.j2
+    dest: /opt/gitlab/embedded/service/gitlab-rails/config/initializers/zz_keycloak_admin_group.rb
+    mode: "0644"
+    owner: root
+    group: root
+  when:
+    - keycloak_enabled | bool
+    - keycloak_admin_group | default('') | length > 0
+  register: keycloak_admin_init
+
+- name: Убрать назначение администратора из группы Keycloak
+  ansible.builtin.file:
+    path: /opt/gitlab/embedded/service/gitlab-rails/config/initializers/zz_keycloak_admin_group.rb
+    state: absent
+  when: not (keycloak_enabled | bool and keycloak_admin_group | default('') | length > 0)
+  register: keycloak_admin_init_removed
+
+- name: Зафиксировать версию пакета
+  ansible.builtin.dpkg_selections:
+    name: gitlab-ce
+    selection: hold
+
+- name: Применить gitlab.rb, если пакет уже стоял
+  ansible.builtin.command: gitlab-ctl reconfigure
+  when: >-
+    (gitlab_rb.changed or smtp_file.changed | default(false) or keycloak_secret_file.changed | default(false)
+    or backup_s3_access_file.changed | default(false) or backup_s3_secret_file.changed | default(false)
+    or keycloak_admin_init.changed | default(false) or keycloak_admin_init_removed.changed | default(false))
+    and not gitlab_pkg.changed
+  changed_when: true
+  timeout: 1800
+
+- name: Перезапустить Puma после первой установки
+  ansible.builtin.command: gitlab-ctl restart puma
+  when:
+    - gitlab_pkg.changed
+    - keycloak_admin_init.changed | default(false) or keycloak_admin_init_removed.changed | default(false)
+  changed_when: true
+  timeout: 300
+
+- name: Gitaly поднялся и видит хранилище
+  ansible.builtin.command: gitlab-ctl status gitaly
+  changed_when: false
+  retries: 10
+  delay: 5
+  register: gitaly_status
+  until: gitaly_status.rc == 0
+
+- name: В конфиге Gitaly есть каталог hook
+  ansible.builtin.command: grep -q custom_hooks_dir /var/opt/gitlab/gitaly/config.toml
+  changed_when: false
+
+- name: В конфиге Gitaly осталось хранилище репозиториев
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -q
+      - -F
+      - "[[storage]]"
+      - /var/opt/gitlab/gitaly/config.toml
+  changed_when: false
+
+- name: Клиент AWS для выгрузки секретов бэкапа
+  ansible.builtin.apt:
+    name: awscli
+    state: present
+  when: gitlab_backup_s3_enabled | bool
+
+- name: Правило срока хранения бэкапов
+  ansible.builtin.template:
+    src: backup-lifecycle.json.j2
+    dest: /etc/gitlab/backup_lifecycle.json
+    mode: "0644"
+    owner: root
+    group: root
+  when: gitlab_backup_s3_enabled | bool and gitlab_backup_s3_retention_days | int > 0
+  register: backup_lifecycle_file
+
+- name: Срок хранения объектов в бакете бэкапов
+  ansible.builtin.command:
+    argv:
+      - aws
+      - s3api
+      - put-bucket-lifecycle-configuration
+      - --bucket
+      - "{{ gitlab_backup_s3_bucket }}"
+      - --endpoint-url
+      - "{{ gitlab_backup_s3_endpoint }}"
+      - --lifecycle-configuration
+      - file:///etc/gitlab/backup_lifecycle.json
+  environment:
+    AWS_SHARED_CREDENTIALS_FILE: /etc/gitlab/backup_s3_credentials
+    AWS_CONFIG_FILE: /etc/gitlab/backup_s3_aws_config
+    AWS_DEFAULT_REGION: "{{ gitlab_backup_s3_region }}"
+  when: gitlab_backup_s3_enabled | bool and gitlab_backup_s3_retention_days | int > 0
+  changed_when: backup_lifecycle_file.changed | default(false)
+
+- name: Скрипт бэкапа
+  ansible.builtin.template:
+    src: gitlab-backup-full.j2
+    dest: /usr/local/sbin/gitlab-backup-full
+    mode: "0750"
+    owner: root
+    group: root
+
+- name: Скрипт письма о сбое бэкапа
+  ansible.builtin.template:
+    src: gitlab-backup-alert.j2
+    dest: /usr/local/sbin/gitlab-backup-alert
+    mode: "0750"
+    owner: root
+    group: root
+  when: gitlab_backup_alert_email | length > 0 and gitlab_smtp_enabled | bool
+
+- name: Timer бэкапа
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "0644"
+    owner: root
+    group: root
+  loop:
+    - src: gitlab-backup.service.j2
+      dest: /etc/systemd/system/gitlab-backup.service
+    - src: gitlab-backup.timer.j2
+      dest: /etc/systemd/system/gitlab-backup.timer
+    - src: gitlab-backup-alert.service.j2
+      dest: /etc/systemd/system/gitlab-backup-alert.service
+  loop_control:
+    label: "{{ item.dest }}"
+  register: backup_units
+  when: item.src != 'gitlab-backup-alert.service.j2' or (gitlab_backup_alert_email | length > 0 and gitlab_smtp_enabled | bool)
+
+- name: Включить ежедневный бэкап
+  ansible.builtin.systemd:
+    name: gitlab-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

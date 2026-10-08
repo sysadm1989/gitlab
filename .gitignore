@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.vault_pass
+ansible/inventories/example/group_vars/gitlab/vault.yml
+ansible/inventories/example/group_vars/gitlab/vault.yml.migrated
+*.retry

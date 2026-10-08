@@ -1,0 +1,77 @@
+---
+# Публичное имя. DNS A/AAAA должен указывать на эту ВМ до запуска:
+# Let's Encrypt ходит на порт 80.
+gitlab_external_url: "https://git.nemero.online"
+gitlab_tls_mode: letsencrypt
+gitlab_allow_selfsigned: false
+# Let's Encrypt не принимает домен example.com.
+gitlab_letsencrypt_email: "a.nazarov@nemero.ru"
+# Почта локального root. Не должна совпадать с почтой человека в SSO:
+# иначе GitLab предлагает привязать этот вход к root и затирает учётку.
+gitlab_root_email: "sysadm1989@gmail.com"
+gitlab_ce_version: "19.4.1-ce.0"
+
+# Яндекс, порт 587 и STARTTLS. Пароль ящика — gitlab_smtp_password в Vault.
+# В SMTP логинится владелец ящика. Письма уходят от gitlab_email_from:
+# Яндекс разрешает этому ящику отправку с адреса gitlab@nemero.ru.
+gitlab_smtp_enabled: true
+gitlab_smtp_address: "smtp.yandex.ru"
+gitlab_smtp_port: 587
+gitlab_smtp_user: "a.nazarov@nemero.ru"
+gitlab_smtp_domain: "nemero.ru"
+gitlab_email_from: "gitlab@nemero.ru"
+
+# Пользователь SSH, которым Ansible заходит на ВМ. Парольный вход будет выключен.
+ssh_allow_users:
+  - nazarov
+
+# Сети администраторов, которых CrowdSec не банит. Без этого легко забанить себя.
+crowdsec_whitelist_cidrs:
+  - 10.0.0.0/8
+# Необязательный ключ консоли CrowdSec. Пусто — локальные баны и CAPI без личного кабинета.
+crowdsec_enroll_key: ""
+
+gitlab_2fa_grace_hours: 48
+gitlab_session_expire_minutes: 480
+gitlab_max_body_size: "100m"
+gitlab_backup_keep_seconds: 604800
+
+# KV v2, секрет platforms/data/prod/gitlab. Токен в git не кладётся: ANSIBLE_HASHI_VAULT_TOKEN или VAULT_TOKEN.
+ansible_hashi_vault_url: https://10.140.2.30:8200
+ansible_hashi_vault_auth_method: token
+ansible_hashi_vault_engine_mount_point: platforms
+ansible_hashi_vault_validate_certs: false
+
+# Yandex Object Storage. Бакет создайте заранее.
+# gitlab_backup_s3_retention_days — через сколько дней бакет удаляет объекты. 0 не ставит правило.
+# GitLab объекты в бакете сам не удаляет. Локальные tar на ВМ живут gitlab_backup_keep_seconds.
+# Если бэкап не завершился, письмо уходит на этот адрес через тот же SMTP. Пусто — письма нет.
+gitlab_backup_alert_email: "a.nazarov@nemero.ru"
+gitlab_backup_s3_enabled: true
+gitlab_backup_s3_bucket: "gitlab-nemero-backups"
+gitlab_backup_s3_region: "ru-central1"
+gitlab_backup_s3_endpoint: "https://storage.yandexcloud.net"
+gitlab_backup_s3_path_style: true
+gitlab_backup_s3_retention_days: 60
+
+# Группы участников и правила апрувов задаёт idp.nemero.corp.
+# Этот плейбук группы не создаёт, состав из Keycloak не копирует и файл правил на ВМ не кладёт.
+
+# Форма пароля выключена: вход только через SSO. true вернёт форму для локального root.
+keycloak_enabled: true
+gitlab_local_login_enabled: false
+keycloak_url: "https://sso.nemero.online"
+keycloak_realm: gitlab
+keycloak_uid_field: preferred_username
+keycloak_gitlab_client_id: gitlab
+# Группа Keycloak. При входе через SSO её участник становится администратором GitLab.
+# В ID token или userinfo нужен claim groups: a_gitlab_admins или /a_gitlab_admins.
+# Если claim есть, а группы в нём нет, права администратора снимаются при следующем входе.
+# Локальный root эта проверка не меняет.
+keycloak_admin_group: a_gitlab_admins
+
+# На ВМ GitLab сервиса апрувов нет. true включает вызов внешнего сервиса.
+# Пока сервиса нет, false: hook стоит, но запись не отклоняет и никуда не ходит.
+# При true ответ {"allow": true} пропускает запись, нет ответа или allow=false — отклоняет.
+gitlab_approval_check_enabled: false
+gitlab_approval_check_url: "https://idp.nemero.corp/approvals/check"

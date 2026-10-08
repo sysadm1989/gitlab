@@ -1,0 +1,12 @@
+---
+crowdsec_collections:
+  - crowdsecurity/linux
+  - crowdsecurity/sshd
+  - crowdsecurity/nginx
+  - crowdsecurity/base-http-scenarios
+  - crowdsecurity/http-cve
+  - crowdsecurity/whitelist-good-actors
+# GitLab Puma слушает 127.0.0.1:8080, это же порт LAPI CrowdSec по умолчанию.
+crowdsec_lapi_listen: "127.0.0.1:8686"
+crowdsec_whitelist_cidrs: []
+crowdsec_enroll_key: ""

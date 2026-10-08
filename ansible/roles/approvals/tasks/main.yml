@@ -1,0 +1,97 @@
+---
+- name: Каталог pre-receive hook
+  ansible.builtin.file:
+    path: /var/opt/gitlab/gitaly/custom_hooks/pre-receive.d
+    state: directory
+    mode: "0755"
+    owner: git
+    group: git
+
+- name: Остановить локальный сервис апрувов
+  ansible.builtin.systemd:
+    name: gitlab-approval
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Удалить unit локального сервиса апрувов
+  ansible.builtin.file:
+    path: /etc/systemd/system/gitlab-approval.service
+    state: absent
+
+- name: Удалить код локального сервиса апрувов
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /opt/gitlab-approval/server.py
+    - /opt/gitlab-approval/policy.py
+    - /opt/gitlab-approval/decide.py
+    - /opt/gitlab-approval/provision.py
+    - /opt/gitlab-approval/hook.py
+    - /etc/gitlab-approval/config.yml
+    - /etc/gitlab-approval/policy.yml
+    - /etc/gitlab-approval/provision.json
+    - /var/lib/gitlab-approval
+    - /opt/gitlab-approval/access.py
+    - /opt/gitlab-approval/sync_access.py
+    - /opt/gitlab-approval/keycloak_client.py
+    - /etc/gitlab-approval/access.yml
+    - /etc/gitlab-approval/access-sync.json
+
+- name: Остановить сверку групп на ВМ GitLab
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  loop:
+    - access-sync.timer
+    - access-sync.service
+
+- name: Удалить unit сверки групп
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/access-sync.timer
+    - /etc/systemd/system/access-sync.service
+
+- name: Перечитать systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Заглушка hook на внешний сервис
+  ansible.builtin.template:
+    src: approval-hook.py.j2
+    dest: /var/opt/gitlab/gitaly/custom_hooks/pre-receive.d/approval-policy
+    mode: "0755"
+    owner: git
+    group: git
+
+- name: Скрипт снятия локального system hook
+  ansible.builtin.template:
+    src: remove-local-approval-hook.py.j2
+    dest: /var/tmp/remove-local-approval-hook.py
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Снять system hook локального сервиса
+  ansible.builtin.command: python3 /var/tmp/remove-local-approval-hook.py
+  register: approval_hook_cleanup
+  changed_when: "'removed=0' not in approval_hook_cleanup.stdout"
+
+- name: Удалить скрипт снятия system hook
+  ansible.builtin.file:
+    path: /var/tmp/remove-local-approval-hook.py
+    state: absent
+
+- name: Удалить каталоги локального сервиса и сверки групп
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /opt/gitlab-approval
+    - /etc/gitlab-approval
+    - /var/lib/gitlab-approval

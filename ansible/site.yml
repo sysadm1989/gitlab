@@ -1,0 +1,84 @@
+---
+- name: Поднять self-hosted GitLab CE
+  hosts: gitlab
+  become: true
+  gather_facts: true
+  # Иначе needrestart перезапускает sshd посреди apt и Ansible теряет хост.
+  environment:
+    NEEDRESTART_MODE: l
+  pre_tasks:
+    - name: Токен HashiCorp Vault задан
+      ansible.builtin.assert:
+        that:
+          - (lookup('env', 'VAULT_TOKEN') | length > 0) or (lookup('env', 'ANSIBLE_HASHI_VAULT_TOKEN') | length > 0) or (ansible_hashi_vault_token is defined and ansible_hashi_vault_token | length > 0)
+        fail_msg: Задайте токен через ANSIBLE_HASHI_VAULT_TOKEN или VAULT_TOKEN. В git токен не кладётся.
+
+    - name: Прочитать секреты из HashiCorp Vault
+      block:
+        # С ноутбука через VPN TCP до Vault открывается, TLS-ответ не возвращается.
+        # Запрос выполняет ВМ: оттуда https://10.140.2.30:8200 отвечает.
+        - name: Загрузить KV
+          ansible.builtin.uri:
+            url: "{{ ansible_hashi_vault_url }}/v1/{{ ansible_hashi_vault_engine_mount_point }}/data/prod/gitlab"
+            method: GET
+            headers:
+              X-Vault-Token: "{{ ansible_hashi_vault_token | default(lookup('env', 'ANSIBLE_HASHI_VAULT_TOKEN') | default(lookup('env', 'VAULT_TOKEN'), true), true) }}"
+            validate_certs: "{{ ansible_hashi_vault_validate_certs | bool }}"
+            return_content: true
+            status_code: 200
+            timeout: 30
+          register: kv_response
+          no_log: true
+
+        - name: Разобрать поля секрета
+          ansible.builtin.set_fact:
+            vault_gitlab_root_password: "{{ kv_response.json.data.data.gitlab_root_password | default('') }}"
+            vault_gitlab_smtp_password: "{{ kv_response.json.data.data.gitlab_smtp_password | default('') }}"
+            vault_keycloak_client_secret: "{{ kv_response.json.data.data.keycloak_client_secret | default('') }}"
+            vault_gitlab_backup_s3_access_key: "{{ kv_response.json.data.data.backup_s3_access_key | default('') }}"
+            vault_gitlab_backup_s3_secret_key: "{{ kv_response.json.data.data.backup_s3_secret_key | default('') }}"
+          no_log: true
+      rescue:
+        - name: Сообщить, что Vault недоступен
+          ansible.builtin.fail:
+            msg: >-
+              ВМ не смогла прочитать {{ ansible_hashi_vault_engine_mount_point }}/prod/gitlab
+              на {{ ansible_hashi_vault_url }}.
+              Смотрите ошибку задачи «Загрузить KV» выше: токен, путь секрета или сеть между ВМ и Vault.
+
+    - name: Проверить ОС и публичный URL
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_release == "resolute"
+          - gitlab_external_url is match("^https://")
+          - gitlab_tls_mode in ["letsencrypt", "provided", "selfsigned"]
+          - gitlab_tls_mode != "selfsigned" or gitlab_allow_selfsigned | bool
+          - gitlab_tls_mode != "letsencrypt" or gitlab_letsencrypt_email is match("^.+@.+\..+$")
+          - gitlab_tls_mode != "letsencrypt" or "example.com" not in gitlab_letsencrypt_email
+          - vault_gitlab_root_password is defined
+          - vault_gitlab_root_password | length >= 12
+          - ansible_user in ssh_allow_users
+          - not gitlab_smtp_enabled or vault_gitlab_smtp_password | length > 0
+          - not (gitlab_backup_s3_enabled | bool) or gitlab_backup_s3_bucket | length > 0
+          - not (gitlab_backup_s3_enabled | bool) or gitlab_backup_s3_region | length > 0
+          - not (gitlab_backup_s3_enabled | bool) or vault_gitlab_backup_s3_access_key | length > 0
+          - not (gitlab_backup_s3_enabled | bool) or vault_gitlab_backup_s3_secret_key | length > 0
+          - not (keycloak_enabled | bool) or keycloak_url is match("^https://")
+          - not (keycloak_enabled | bool) or keycloak_realm | length > 0
+          - not (keycloak_enabled | bool) or (vault_keycloak_client_secret is defined and vault_keycloak_client_secret | length >= 16)
+        fail_msg: >-
+          Нужны Ubuntu 26.04, https:// URL, пароль root не короче 12 символов,
+          ansible_user в ssh_allow_users и пароль SMTP, если почта включена.
+          Для Keycloak нужны https URL, realm и секрет клиента gitlab длиной от 16 символов.
+          Для бэкапа в S3 нужны бакет, регион и оба ключа в Vault.
+          Самоподписанный сертификат допустим только при gitlab_allow_selfsigned=true
+          и не для инстанса, который смотрит в интернет.
+          Для Let's Encrypt нужен реальный почтовый адрес, не example.com.
+  roles:
+    - role: hardening
+    - role: gitlab
+    - role: baseline
+    - role: approvals
+      tags: [approval-stub]
+    - role: crowdsec

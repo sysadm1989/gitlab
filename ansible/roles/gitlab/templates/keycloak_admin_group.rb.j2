@@ -1,0 +1,67 @@
+# frozen_string_literal: true
+# GitLab CE не назначает администратора по группе OIDC. Это делает вход через SSO.
+module KeycloakOidcAdminGroup
+  ADMIN_GROUP = {{ keycloak_admin_group | to_json }}
+
+  def save(provider = protocol_name)
+    saved = super
+    apply_keycloak_admin_group if saved.is_a?(User)
+    saved
+  end
+
+  def update_profile
+    return if local_root?
+
+    super
+  end
+
+  def add_or_update_user_identities
+    if local_root?
+      gl_user.identities.where(provider: "openid_connect").destroy_all
+      return
+    end
+
+    super
+  end
+
+  private
+
+  def local_root?
+    gl_user&.username == "root"
+  end
+
+  def apply_keycloak_admin_group
+    return unless auth_hash.provider == "openid_connect"
+    return if local_root?
+
+    groups = keycloak_groups_from_token
+    return if groups.nil?
+
+    member = groups.any? { |group| keycloak_admin_group_name?(group) }
+    return if gl_user.admin == member
+
+    gl_user.admin = member
+    gl_user.save!
+    Gitlab::AppLogger.info("keycloak admin group: user=#{gl_user.username} admin=#{member}")
+  end
+
+  def keycloak_groups_from_token
+    info = auth_hash.auth_hash.dig("extra", "raw_info") || auth_hash.auth_hash.dig(:extra, :raw_info)
+    return nil if info.nil? || !info.respond_to?(:key?)
+
+    key = ["groups", :groups].find { |name| info.key?(name) }
+    return nil if key.nil?
+
+    Array(info[key]).flat_map { |item| item.to_s.split(/\s+/) }.reject(&:empty?)
+  end
+
+  def keycloak_admin_group_name?(group)
+    name = group.delete_prefix("/")
+    name == ADMIN_GROUP || name.end_with?("/#{ADMIN_GROUP}")
+  end
+end
+
+Rails.application.config.after_initialize do
+  user_class = Gitlab::Auth::OAuth::User
+  user_class.prepend(KeycloakOidcAdminGroup) unless user_class.ancestors.include?(KeycloakOidcAdminGroup)
+end

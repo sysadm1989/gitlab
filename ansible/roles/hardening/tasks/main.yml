@@ -1,0 +1,113 @@
+---
+- name: Пакеты базовой защиты
+  ansible.builtin.apt:
+    name:
+      - ufw
+      - unattended-upgrades
+      - acl
+      - ca-certificates
+      - curl
+      - gnupg
+      - python3
+      - python3-yaml
+    state: present
+    update_cache: true
+
+- name: SSH только по ключу
+  ansible.builtin.template:
+    src: 99-gitlab-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-gitlab-hardening.conf
+    mode: "0644"
+    owner: root
+    group: root
+  register: sshd_dropin
+
+- name: Проверить конфиг sshd до перезагрузки
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+
+- name: Перечитать sshd
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+  when: sshd_dropin.changed
+
+- name: Sysctl
+  ansible.builtin.template:
+    src: 99-gitlab-hardening.sysctl.j2
+    dest: /etc/sysctl.d/99-gitlab-hardening.conf
+    mode: "0644"
+    owner: root
+    group: root
+  register: sysctl_file
+
+- name: Применить sysctl
+  ansible.builtin.command: sysctl --system
+  when: sysctl_file.changed
+  changed_when: true
+
+# ufw задаёт, какие порты вообще открыты. CrowdSec порты не открывает:
+# nftables-bouncer только дропает IP из бана, в своей таблице, до правил ufw.
+- name: Разрешить SSH, HTTP и HTTPS до включения ufw
+  ansible.builtin.command: "ufw allow {{ item }}/tcp"
+  loop:
+    - "{{ gitlab_ssh_port | string }}"
+    - "80"
+    - "443"
+  register: ufw_allow
+  changed_when: "'Skipping' not in _task.result.stdout"
+
+- name: Политика ufw по умолчанию
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - ufw default deny incoming
+    - ufw default allow outgoing
+  register: ufw_policy
+  changed_when: "'already' not in _task.result.stdout"
+
+- name: Состояние ufw
+  ansible.builtin.command: ufw status
+  register: ufw_status
+  changed_when: false
+
+- name: Включить ufw
+  ansible.builtin.command: ufw --force enable
+  when: "'Status: active' not in ufw_status.stdout"
+  changed_when: true
+
+- name: Каталог настроек needrestart
+  ansible.builtin.file:
+    path: /etc/needrestart/conf.d
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: needrestart только показывает службы, не перезапускает их
+  ansible.builtin.copy:
+    dest: /etc/needrestart/conf.d/ansible.conf
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # a перезапускает sshd во время apt и обрывает сессию Ansible.
+      $nrconf{restart} = 'l';
+
+- name: Автообновления только security, без GitLab
+  ansible.builtin.template:
+    src: 52gitlab-unattended.j2
+    dest: /etc/apt/apt.conf.d/52gitlab-unattended
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Включить unattended-upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";

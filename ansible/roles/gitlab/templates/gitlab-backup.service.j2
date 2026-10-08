@@ -1,0 +1,20 @@
+[Unit]
+Description=GitLab backup with config secrets
+After=gitlab-runsvdir.service
+{% if gitlab_backup_alert_email | length > 0 and gitlab_smtp_enabled | bool %}
+OnFailure=gitlab-backup-alert.service
+{% endif %}
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/sbin/gitlab-backup-full
+TimeoutStartSec=6h
+{% if gitlab_backup_s3_enabled | bool %}
+Environment=AWS_SHARED_CREDENTIALS_FILE=/etc/gitlab/backup_s3_credentials
+Environment=AWS_CONFIG_FILE=/etc/gitlab/backup_s3_aws_config
+Environment=AWS_DEFAULT_REGION={{ gitlab_backup_s3_region }}
+Environment=GITLAB_BACKUP_S3_BUCKET={{ gitlab_backup_s3_bucket }}
+Environment=GITLAB_BACKUP_S3_ENDPOINT={{ gitlab_backup_s3_endpoint }}
+{% endif %}

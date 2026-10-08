@@ -1,0 +1,6 @@
+---
+keycloak_enabled: false
+gitlab_local_login_enabled: true
+gitlab_2fa_grace_hours: 48
+gitlab_session_expire_minutes: 480
+gitlab_host: "{{ gitlab_external_url | urlsplit('hostname') }}"

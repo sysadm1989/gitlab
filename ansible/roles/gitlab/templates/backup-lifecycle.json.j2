@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-gitlab-backups",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Status": "Enabled",
+      "Expiration": {
+        "Days": {{ gitlab_backup_s3_retention_days | int }}
+      }
+    }
+  ]
+}

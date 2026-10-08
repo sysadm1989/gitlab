@@ -1,0 +1,12 @@
+name: local/whitelist
+description: "Loopback и сети администраторов"
+whitelist:
+  reason: "local and admin"
+  ip:
+    - "127.0.0.1"
+    - "::1"
+  cidr:
+    - "127.0.0.0/8"
+{% for cidr in crowdsec_whitelist_cidrs %}
+    - "{{ cidr }}"
+{% endfor %}

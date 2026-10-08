@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""pre-receive. На этой ВМ сервиса апрувов нет: решение принимает внешний сервис."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+SERVICE_URL = {{ gitlab_approval_check_url | to_json }}
+CHECK_ENABLED = {{ gitlab_approval_check_enabled | bool | to_json }}
+
+
+def main() -> int:
+    if not CHECK_ENABLED:
+        return 0
+    updates = []
+    repo = os.environ.get("GL_REPOSITORY") or ""
+    for line in sys.stdin:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        oldrev, newrev, ref = parts[0], parts[1], parts[2]
+        item = {"oldrev": oldrev, "newrev": newrev, "ref": ref, "parents": [], "message": "", "patch_id": ""}
+        if repo and set(newrev) != {"0"} and set(oldrev) != {"0"}:
+            item["parents"] = _parents(repo, newrev)
+            item["message"] = _message(repo, newrev)
+            item["patch_id"] = _patch_id(repo, oldrev, newrev)
+        updates.append(item)
+    if not updates:
+        return 0
+    payload = {
+        "project_path": os.environ.get("GL_PROJECT_PATH") or "",
+        "username": os.environ.get("GL_USERNAME") or "",
+        "updates": updates,
+    }
+    request = urllib.request.Request(
+        SERVICE_URL,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read().decode())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        sys.stderr.write(f"Отклонено: сервис апрувов {SERVICE_URL} недоступен ({exc}).\n")
+        return 1
+    if body.get("allow"):
+        return 0
+    sys.stderr.write((body.get("message") or "Отклонено политикой апрувов.") + "\n")
+    return 1
+
+
+def _git(repo: str, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "--git-dir", repo, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _parents(repo: str, rev: str) -> list[str]:
+    line = _git(repo, "rev-list", "--parents", "-n", "1", rev)
+    parts = line.split()
+    return parts[1:] if len(parts) > 1 else []
+
+
+def _message(repo: str, rev: str) -> str:
+    return _git(repo, "log", "-1", "--format=%B", rev)
+
+
+def _patch_id(repo: str, oldrev: str, newrev: str) -> str:
+    diff = subprocess.run(
+        ["git", "--git-dir", repo, "diff", oldrev, newrev],
+        check=False,
+        capture_output=True,
+    )
+    if diff.returncode != 0 or not diff.stdout:
+        return ""
+    patched = subprocess.run(
+        ["git", "patch-id", "--stable"],
+        input=diff.stdout,
+        check=False,
+        capture_output=True,
+    )
+    if patched.returncode != 0:
+        return ""
+    return patched.stdout.decode().split()[0] if patched.stdout else ""
+
+
+if __name__ == "__main__":
+    sys.exit(main())

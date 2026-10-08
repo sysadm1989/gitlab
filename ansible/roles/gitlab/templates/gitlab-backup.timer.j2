@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily GitLab backup
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=20min
+
+[Install]
+WantedBy=timers.target

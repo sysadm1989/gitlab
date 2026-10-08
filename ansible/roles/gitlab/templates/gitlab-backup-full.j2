@@ -1,0 +1,37 @@
+#!/bin/bash
+# Архив GitLab и секреты, без которых архив не восстановить.
+set -euo pipefail
+umask 077
+config_dir=/var/opt/gitlab/backups/config
+install -d -m 0700 -o root -g root "$config_dir"
+cp -a /etc/gitlab/gitlab-secrets.json /etc/gitlab/gitlab.rb "$config_dir/"
+for extra in smtp_password backup_s3_access_key backup_s3_secret backup_s3_credentials backup_s3_aws_config keycloak_client_secret; do
+  if [[ -f /etc/gitlab/$extra ]]; then
+    cp -a "/etc/gitlab/$extra" "$config_dir/"
+  fi
+done
+version=$(tr -d '[:space:]' < /opt/gitlab/embedded/service/gitlab-rails/VERSION)
+backup_id="$(date +%Y_%m_%d)_$(date +%s)_${version}"
+/opt/gitlab/bin/gitlab-backup create BACKUP="$backup_id" CRON=1
+{% if gitlab_backup_s3_enabled | bool %}
+latest="/var/opt/gitlab/backups/${backup_id}_gitlab_backup.tar"
+if [[ ! -f "$latest" ]]; then
+  echo "gitlab-backup не создал архив ${backup_id}" >&2
+  exit 1
+fi
+files=()
+for name in gitlab-secrets.json gitlab.rb smtp_password backup_s3_access_key backup_s3_secret backup_s3_credentials backup_s3_aws_config keycloak_client_secret; do
+  if [[ -f "$config_dir/$name" ]]; then
+    files+=("$name")
+  fi
+done
+tgz="/var/opt/gitlab/backups/${backup_id}-config.tgz"
+tar -C "$config_dir" -czf "$tgz" "${files[@]}"
+endpoint_args=()
+if [[ -n "${GITLAB_BACKUP_S3_ENDPOINT:-}" ]]; then
+  endpoint_args=(--endpoint-url "$GITLAB_BACKUP_S3_ENDPOINT")
+fi
+aws s3 cp "$tgz" "s3://${GITLAB_BACKUP_S3_BUCKET}/config/${backup_id}-config.tgz" "${endpoint_args[@]}"
+rm -f "$tgz" "$latest"
+{% endif %}
+find /var/opt/gitlab/backups -maxdepth 1 -type f -name '*_gitlab_backup.tar' -mtime +{{ (gitlab_backup_keep_seconds / 86400) | int }} -delete

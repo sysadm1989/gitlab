@@ -1,0 +1,13 @@
+# Managed by Ansible.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+MaxAuthTries 3
+LoginGraceTime 30
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+# ssh_allow_users — вход администратора. git — системный пользователь Omnibus для git@хост.
+AllowUsers {{ (ssh_allow_users + ['git']) | unique | join(' ') }}

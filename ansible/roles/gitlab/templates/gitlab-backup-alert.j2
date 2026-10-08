@@ -1,0 +1,61 @@
+#!/bin/bash
+# Письмо, если gitlab-backup.service не завершился. Пароль SMTP читается из файла и в журнал не пишется.
+set -euo pipefail
+
+recipient="{{ gitlab_backup_alert_email }}"
+if [[ -z "$recipient" ]]; then
+  exit 0
+fi
+if [[ ! -s /etc/gitlab/smtp_password ]]; then
+  echo "нет /etc/gitlab/smtp_password, письмо не отправлено" >&2
+  exit 1
+fi
+
+invocation=$(systemctl show -p InvocationID --value gitlab-backup.service || true)
+if [[ -n "$invocation" ]]; then
+  journal=$(journalctl -u gitlab-backup.service _SYSTEMD_INVOCATION_ID="$invocation" --no-pager -o short-iso | tail -n 80 || true)
+else
+  journal=$(journalctl -u gitlab-backup.service -n 80 --no-pager -o short-iso || true)
+fi
+
+export GITLAB_BACKUP_ALERT_JOURNAL="$journal"
+export GITLAB_BACKUP_ALERT_HOST="$(hostname -s)"
+export GITLAB_BACKUP_ALERT_TO="$recipient"
+export GITLAB_BACKUP_ALERT_FROM="{{ gitlab_email_from }}"
+export GITLAB_BACKUP_SMTP_HOST="{{ gitlab_smtp_address }}"
+export GITLAB_BACKUP_SMTP_PORT="{{ gitlab_smtp_port }}"
+export GITLAB_BACKUP_SMTP_USER="{{ gitlab_smtp_user }}"
+
+/usr/bin/python3 - << 'PY'
+import os
+import smtplib
+import ssl
+from email.message import EmailMessage
+from pathlib import Path
+
+password = Path("/etc/gitlab/smtp_password").read_text().strip()
+host = os.environ["GITLAB_BACKUP_ALERT_HOST"]
+journal = os.environ.get("GITLAB_BACKUP_ALERT_JOURNAL", "").strip()
+if len(journal) > 12000:
+    journal = journal[-12000:]
+body = (
+    f"Бэкап GitLab на {host} не завершился.\n"
+    "Архив, который успел собраться, остаётся в /var/opt/gitlab/backups/.\n\n"
+    f"{journal}\n"
+)
+message = EmailMessage()
+message["Subject"] = f"GitLab: бэкап не ушёл в S3 ({host})"
+message["From"] = os.environ["GITLAB_BACKUP_ALERT_FROM"]
+message["To"] = os.environ["GITLAB_BACKUP_ALERT_TO"]
+message.set_content(body)
+with smtplib.SMTP(
+    os.environ["GITLAB_BACKUP_SMTP_HOST"],
+    int(os.environ["GITLAB_BACKUP_SMTP_PORT"]),
+    timeout=30,
+) as smtp:
+    smtp.ehlo()
+    smtp.starttls(context=ssl.create_default_context())
+    smtp.ehlo()
+    smtp.login(os.environ["GITLAB_BACKUP_SMTP_USER"], password)
+    smtp.send_message(message)
+PY

@@ -1,0 +1,13 @@
+type: leaky
+name: local/gitlab-signin-bf
+description: "Подбор пароля к веб-входу GitLab. Форма логина отвечает 200, общий HTTP-сценарий её не видит."
+filter: evt.Meta.service == 'http' && evt.Parsed.http_verb == 'POST' && evt.Parsed.http_path in ['/users/sign_in', '/users/password', '/oauth/token']
+groupby: evt.Meta.source_ip
+leakspeed: 30s
+capacity: 5
+blackhole: 1m
+labels:
+  remediation: true
+  service: gitlab
+  type: bruteforce
+  confidence: 3

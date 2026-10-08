@@ -1,0 +1,177 @@
+# frozen_string_literal: true
+# Идемпотентные настройки инстанса. Неизвестные для этой версии поля пропускаются.
+settings = ApplicationSetting.current
+desired = {
+  signup_enabled: false,
+  require_admin_approval_after_user_signup: true,
+  require_two_factor_authentication: false,
+  two_factor_grace_period: {{ gitlab_2fa_grace_hours }},
+  session_expire_delay: {{ gitlab_session_expire_minutes }},
+  password_authentication_enabled_for_web: {{ 'true' if ((not (keycloak_enabled | bool)) or (gitlab_local_login_enabled | bool)) else 'false' }},
+  password_authentication_enabled_for_git: {{ 'false' if (keycloak_enabled | bool) else 'true' }},
+  minimum_password_length: 12,
+  password_number_required: true,
+  password_symbol_required: true,
+  password_uppercase_required: true,
+  password_lowercase_required: true,
+  default_project_visibility: 0,
+  default_group_visibility: 0,
+  restricted_visibility_levels: [20],
+  default_branch_name: "main",
+  default_branch_protection_defaults: {
+    "allowed_to_push" => [{ "access_level" => 0 }],
+    "allowed_to_merge" => [{ "access_level" => 40 }],
+    "allow_force_push" => false,
+    "developer_can_initial_push" => true
+  },
+  usage_ping_enabled: false,
+  version_check_enabled: true,
+  snowplow_enabled: false,
+  hide_third_party_offers: true,
+  auto_devops_enabled: false,
+  duo_features_enabled: false,
+  lock_duo_features_enabled: true,
+  duo_remote_flows_enabled: false,
+  lock_duo_remote_flows_enabled: true,
+  duo_foundational_flows_enabled: false,
+  lock_duo_foundational_flows_enabled: true,
+  auto_duo_code_review_enabled: false,
+  lock_auto_duo_code_review_enabled: true,
+  instance_level_ai_beta_features_enabled: false,
+  import_sources: [],
+  bulk_import_enabled: false,
+  project_export_enabled: true,
+  mirror_available: false,
+  diagramsnet_enabled: false,
+  plantuml_enabled: false,
+  gitpod_enabled: false,
+  dependency_proxy_enabled: false,
+  disable_feed_token: true,
+  deactivate_dormant_users: true,
+  deactivate_dormant_users_period: 90,
+  max_personal_access_token_lifetime: 365,
+  allow_local_requests_from_web_hooks_and_services: false,
+  outbound_local_requests_whitelist: ["127.0.0.1"],
+  outbound_local_requests_allowlist: ["127.0.0.1"],
+  dns_rebinding_protection_enabled: true,
+  throttle_unauthenticated_enabled: true,
+  throttle_unauthenticated_period_in_seconds: 60,
+  throttle_unauthenticated_requests_per_period: 30,
+  throttle_authenticated_api_enabled: true,
+  throttle_authenticated_api_period_in_seconds: 60,
+  throttle_authenticated_api_requests_per_period: 120,
+  throttle_authenticated_web_enabled: true,
+  throttle_authenticated_web_period_in_seconds: 60,
+  throttle_authenticated_web_requests_per_period: 120,
+  throttle_protected_paths_enabled: true,
+  throttle_protected_paths_period_in_seconds: 60,
+  throttle_protected_paths_requests_per_period: 10,
+  rsa_key_restriction: 2048,
+  dsa_key_restriction: -1,
+  abuse_notification_email: "{{ gitlab_root_email }}",
+  merge_commit_template: "Merge branch '%{source_branch}' into '%{target_branch}'\n\n%{title}\n\nSee merge request %{reference}\n",
+  squash_commit_template: "%{title}\n\nSee merge request %{reference}\n",
+  first_day_of_week: 1,
+  can_create_group: true
+}
+
+skipped = []
+desired.each do |key, value|
+  setter = "#{key}="
+  unless settings.respond_to?(setter)
+    skipped << key.to_s
+    next
+  end
+  settings.public_send(setter, value)
+end
+settings.save!
+warn "skipped settings: #{skipped.join(', ')}" unless skipped.empty?
+
+def disable_boolean_columns(table, flags)
+  connection = ApplicationRecord.connection
+  return unless connection.data_source_exists?(table)
+
+  existing = connection.columns(table).map(&:name)
+  chosen = flags.select { |name, _| existing.include?(name) }
+  return if chosen.empty?
+
+  assigns = chosen.map do |name, value|
+    "#{connection.quote_column_name(name)} = #{value ? "TRUE" : "FALSE"}"
+  end
+  connection.execute("UPDATE #{connection.quote_table_name(table)} SET #{assigns.join(", ")}")
+end
+
+disable_boolean_columns("namespace_settings", {
+  "duo_features_enabled" => false,
+  "lock_duo_features_enabled" => true,
+  "duo_remote_flows_enabled" => false,
+  "lock_duo_remote_flows_enabled" => true,
+  "duo_foundational_flows_enabled" => false,
+  "lock_duo_foundational_flows_enabled" => true,
+  "duo_custom_flows_enabled" => false,
+  "lock_duo_custom_flows_enabled" => true,
+  "duo_custom_agents_enabled" => false,
+  "lock_duo_custom_agents_enabled" => true,
+  "duo_external_agents_enabled" => false,
+  "lock_duo_external_agents_enabled" => true
+})
+disable_boolean_columns("project_settings", {
+  "duo_features_enabled" => false,
+  "duo_remote_flows_enabled" => false,
+  "duo_foundational_flows_enabled" => false,
+  "auto_duo_code_review_enabled" => false
+})
+disable_boolean_columns("ai_settings", {
+  "foundational_agents_default_enabled" => false,
+  "duo_core_features_enabled" => false
+})
+disable_boolean_columns("namespace_ai_settings", {
+  "foundational_agents_default_enabled" => false,
+  "duo_workflow_mcp_enabled" => false
+})
+
+local_root = User.find_by(id: 1)
+if local_root
+  local_root.identities.where(provider: "openid_connect").destroy_all
+  local_root.user_synced_attributes_metadata&.destroy
+  local_root.reload
+  desired_email = ENV["GITLAB_ROOT_EMAIL"]
+  if local_root.username != "root" || local_root.email != desired_email || !local_root.admin?
+    local_root.skip_reconfirmation!
+    restored = Users::UpdateService.new(
+      local_root,
+      user: local_root,
+      username: "root",
+      email: desired_email,
+      admin: true
+    ).execute(check_password: false)
+    abort "root restore failed: #{restored[:message]}" unless restored[:status] == :success
+    puts "local root restored"
+  end
+  # Смена primary email оставляет старый адрес в emails. Пока он подтверждён
+  # у root, SSO с той же почтой не создаёт отдельного пользователя.
+  if desired_email.present?
+    removed = Email.where(user_id: local_root.id).where.not(email: desired_email).destroy_all
+    puts "removed #{removed.size} secondary emails from root" if removed.any?
+  end
+end
+
+if ENV["GITLAB_SET_ROOT_PASSWORD"] == "1"
+  password = File.read("/etc/gitlab/.root-password-pending").strip
+  root = User.find_by_username!("root")
+  root.password = password
+  root.password_confirmation = password
+  root.email = ENV.fetch("GITLAB_ROOT_EMAIL") if root.email != ENV["GITLAB_ROOT_EMAIL"]
+  root.skip_reconfirmation! if root.respond_to?(:skip_reconfirmation!)
+  unless root.save
+    abort "root save failed: #{root.errors.full_messages.join('; ')}"
+  end
+end
+
+puts "application settings saved"
+
+root = User.find_by_username!("root")
+if root.two_factor_enabled?
+  root.disable_two_factor!
+  puts "root two-factor disabled"
+end

@@ -1,0 +1,20 @@
+---
+gitlab_ce_version: "19.4.1-ce.0"
+gitlab_tls_mode: letsencrypt
+gitlab_allow_selfsigned: false
+gitlab_max_body_size: "100m"
+gitlab_backup_keep_seconds: 604800
+gitlab_backup_s3_enabled: false
+gitlab_backup_s3_bucket: ""
+gitlab_backup_s3_region: ""
+gitlab_backup_s3_endpoint: ""
+gitlab_backup_s3_path_style: true
+gitlab_backup_s3_retention_days: 60
+gitlab_backup_alert_email: ""
+gitlab_hsts_include_subdomains: false
+gitlab_smtp_enabled: true
+gitlab_smtp_port: 587
+keycloak_enabled: false
+keycloak_gitlab_client_id: gitlab
+keycloak_uid_field: preferred_username
+keycloak_admin_group: ""

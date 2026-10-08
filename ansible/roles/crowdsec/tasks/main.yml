@@ -1,0 +1,187 @@
+---
+- name: Уже подключённый репозиторий CrowdSec
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/apt/sources.list.d/crowdsec_crowdsec.list
+    - /etc/apt/sources.list.d/crowdsec.list
+  register: crowdsec_repo
+
+- name: Официальный репозиторий CrowdSec
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -fsSL https://install.crowdsec.net -o /tmp/install-crowdsec.sh
+    bash /tmp/install-crowdsec.sh
+  args:
+    executable: /bin/bash
+  when: crowdsec_repo.results | rejectattr('stat.exists') | list | length == 2
+
+- name: Движок CrowdSec
+  ansible.builtin.apt:
+    name: crowdsec
+    state: present
+    update_cache: true
+
+- name: Коллекции сценариев
+  ansible.builtin.command: cscli collections install {{ item }}
+  loop: "{{ crowdsec_collections }}"
+  register: crowdsec_collections_install
+  changed_when: "'Nothing to install or upgrade' not in _task.result.stdout"
+
+- name: LAPI CrowdSec не занимает порт GitLab
+  ansible.builtin.replace:
+    path: /etc/crowdsec/config.yaml
+    regexp: 'listen_uri:\s*127\.0\.0\.1:8080'
+    replace: "listen_uri: {{ crowdsec_lapi_listen }}"
+  register: crowdsec_listen
+
+- name: cscli ходит на тот же порт
+  ansible.builtin.replace:
+    path: /etc/crowdsec/local_api_credentials.yaml
+    regexp: 'url:\s*http://127\.0\.0\.1:8080/?'
+    replace: "url: http://{{ crowdsec_lapi_listen }}"
+  register: crowdsec_cscli_url
+
+- name: Запустить движок CrowdSec
+  ansible.builtin.systemd:
+    name: crowdsec
+    enabled: true
+    state: "{{ 'restarted' if (crowdsec_listen.changed or crowdsec_cscli_url.changed) else 'started' }}"
+
+- name: Конфиг bouncer уже есть
+  ansible.builtin.stat:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+  register: crowdsec_bouncer_cfg
+
+- name: Bouncer не обращается к GitLab на порту 8080
+  ansible.builtin.replace:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    regexp: 'api_url:\s*http://127\.0\.0\.1:8080/?'
+    replace: "api_url: http://{{ crowdsec_lapi_listen }}/"
+  when: crowdsec_bouncer_cfg.stat.exists
+
+- name: Firewall bouncer на nftables
+  block:
+    - name: Поставить пакет bouncer
+      ansible.builtin.apt:
+        name: crowdsec-firewall-bouncer-nftables
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+  rescue:
+    - name: Postinst bouncer не стартовал
+      ansible.builtin.debug:
+        msg: >-
+          crowdsec-firewall-bouncer не поднялся при установке.
+          Порт 8080 занят GitLab, LAPI переносится на {{ crowdsec_lapi_listen }}.
+
+- name: Bouncer после установки смотрит на LAPI
+  ansible.builtin.replace:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    regexp: 'api_url:\s*http://127\.0\.0\.1:8080/?'
+    replace: "api_url: http://{{ crowdsec_lapi_listen }}/"
+
+- name: Сбросить счётчик падений bouncer
+  ansible.builtin.command: systemctl reset-failed crowdsec-firewall-bouncer
+  changed_when: false
+  failed_when: false
+
+- name: Состояние пакета bouncer
+  ansible.builtin.command: dpkg -s crowdsec-firewall-bouncer-nftables
+  register: crowdsec_bouncer_status
+  changed_when: false
+  failed_when: false
+
+- name: Довести настройку пакета bouncer
+  ansible.builtin.command: dpkg --configure crowdsec-firewall-bouncer-nftables
+  when: "'install ok installed' not in crowdsec_bouncer_status.stdout"
+  register: crowdsec_bouncer_configure
+  changed_when: crowdsec_bouncer_configure.rc == 0
+  failed_when:
+    - crowdsec_bouncer_configure.rc != 0
+    - "'already installed and configured' not in crowdsec_bouncer_configure.stderr"
+
+- name: Каталоги локальных правил CrowdSec
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  loop:
+    - /etc/crowdsec/acquis.d
+    - /etc/crowdsec/scenarios
+    - /etc/crowdsec/postoverflows/s01-whitelist
+
+# Движок запущен от root, пользователя crowdsec нет. Логи nginx root и так читает.
+- name: Логи GitLab nginx для CrowdSec
+  ansible.builtin.template:
+    src: gitlab-nginx.yaml.j2
+    dest: /etc/crowdsec/acquis.d/gitlab-nginx.yaml
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload crowdsec
+
+- name: Журнал sshd для CrowdSec
+  ansible.builtin.template:
+    src: sshd-journal.yaml.j2
+    dest: /etc/crowdsec/acquis.d/sshd-journal.yaml
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload crowdsec
+
+- name: Сценарий подбора пароля GitLab
+  ansible.builtin.template:
+    src: local-gitlab-signin-bf.yaml.j2
+    dest: /etc/crowdsec/scenarios/local-gitlab-signin-bf.yaml
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload crowdsec
+
+- name: Белый список loopback и администраторов
+  ansible.builtin.template:
+    src: local-whitelist.yaml.j2
+    dest: /etc/crowdsec/postoverflows/s01-whitelist/local-whitelist.yaml
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload crowdsec
+
+- name: Маркер регистрации в консоли CrowdSec
+  ansible.builtin.stat:
+    path: /etc/crowdsec/.ansible-enrolled
+  register: crowdsec_console
+
+- name: Консоль CrowdSec, если передан ключ
+  ansible.builtin.command: cscli console enroll {{ crowdsec_enroll_key }}
+  when:
+    - crowdsec_enroll_key | length > 0
+    - not crowdsec_console.stat.exists
+  no_log: true
+  changed_when: true
+
+- name: Запомнить регистрацию в консоли
+  ansible.builtin.file:
+    path: /etc/crowdsec/.ansible-enrolled
+    state: touch
+    mode: "0600"
+    owner: root
+    group: root
+  when:
+    - crowdsec_enroll_key | length > 0
+    - not crowdsec_console.stat.exists
+
+- name: Перечитать CrowdSec
+  ansible.builtin.meta: flush_handlers
+
+- name: CrowdSec и bouncer запущены
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - crowdsec
+    - crowdsec-firewall-bouncer

@@ -1,0 +1,3 @@
+---
+gitlab_approval_check_enabled: false
+gitlab_approval_check_url: "https://idp.nemero.corp/approvals/check"

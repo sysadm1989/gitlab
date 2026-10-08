@@ -1,0 +1,91 @@
+---
+- name: Дождаться GitLab
+  ansible.builtin.uri:
+    url: "https://127.0.0.1/-/health"
+    method: GET
+    headers:
+      Host: "{{ gitlab_external_url | urlsplit('hostname') }}"
+    validate_certs: false
+    status_code: 200
+  register: gitlab_health
+  retries: 60
+  delay: 10
+  until: gitlab_health.status == 200
+
+- name: Маркер пароля root
+  ansible.builtin.stat:
+    path: /etc/gitlab/.root-password-managed
+  register: root_password_marker
+
+- name: Настройки инстанса и пароль root
+  block:
+    - name: Скрипт настроек инстанса
+      ansible.builtin.template:
+        src: apply_settings.rb.j2
+        dest: /var/tmp/gitlab-apply-settings.rb
+        mode: "0644"
+        owner: root
+        group: root
+
+    - name: Временный файл пароля root
+      ansible.builtin.copy:
+        dest: /etc/gitlab/.root-password-pending
+        content: "{{ vault_gitlab_root_password }}\n"
+        mode: "0640"
+        owner: root
+        group: git
+      when: not root_password_marker.stat.exists
+      no_log: true
+
+    - name: Применить настройки инстанса
+      ansible.builtin.command: gitlab-rails runner /var/tmp/gitlab-apply-settings.rb
+      environment:
+        GITLAB_SET_ROOT_PASSWORD: "{{ '0' if root_password_marker.stat.exists else '1' }}"
+        GITLAB_ROOT_EMAIL: "{{ gitlab_root_email }}"
+      changed_when: true
+
+    - name: Запомнить, что пароль root задан
+      ansible.builtin.file:
+        path: /etc/gitlab/.root-password-managed
+        state: touch
+        mode: "0600"
+        owner: root
+        group: root
+
+    - name: Удалить первоначальный пароль Omnibus
+      ansible.builtin.file:
+        path: /etc/gitlab/initial_root_password
+        state: absent
+  always:
+    - name: Удалить скрипт настроек из /var/tmp
+      ansible.builtin.file:
+        path: /var/tmp/gitlab-apply-settings.rb
+        state: absent
+
+    - name: Удалить временный файл пароля root
+      ansible.builtin.file:
+        path: /etc/gitlab/.root-password-pending
+        state: absent
+
+- name: Напомнить про окно 2FA
+  ansible.builtin.debug:
+    msg: >-
+      Публичная регистрация выключена. У root второй фактор GitLab выключен.
+  when: not keycloak_enabled | bool
+
+- name: Напомнить про вход через SSO и локального root
+  ansible.builtin.debug:
+    msg: >-
+      Люди входят через SSO {{ keycloak_url }}. Локальный root входит формой пароля,
+      второй фактор GitLab у root выключен.
+      Для учёток SSO второй фактор GitLab не требуется: его задаёт Keycloak.
+      Git по HTTPS с паролем выключен.
+  when: keycloak_enabled | bool and gitlab_local_login_enabled | bool
+
+- name: Напомнить, что форма пароля закрыта
+  ansible.builtin.debug:
+    msg: >-
+      Вход только через SSO {{ keycloak_url }}. Форма пароля выключена.
+      Второй фактор должен быть обязательным в Keycloak.
+      Запасной вход root — только через gitlab-rails на сервере.
+  when: keycloak_enabled | bool and not (gitlab_local_login_enabled | bool)
